@@ -14,6 +14,17 @@ ADMIN_ID = 7472543084
 KEYS_FILE = "keys.json"
 user_state = {}
 
+# --- [KUSA] AUTO-CREATE NECESSARY FILES ---
+# Gagawa ng keys.json kung wala pa
+if not os.path.exists(KEYS_FILE):
+    with open(KEYS_FILE, "w") as f:
+        json.dump({}, f)
+
+# Gagawa ng sample logs1.txt kung wala pa para hindi mag-error ang search
+if not os.path.exists("logs1.txt"):
+    with open("logs1.txt", "w") as f:
+        f.write("admin:admin123\nsample_user:pass123")
+
 # Initialize Flask and Pyrogram
 flask_app = Flask(__name__)
 app = Client(
@@ -25,12 +36,12 @@ app = Client(
 
 # --- HELPERS ---
 def load_keys():
-    if os.path.exists(KEYS_FILE):
-        with open(KEYS_FILE, "r") as f:
-            try:
+    try:
+        if os.path.exists(KEYS_FILE):
+            with open(KEYS_FILE, "r") as f:
                 return json.load(f)
-            except:
-                return {}
+    except:
+        return {}
     return {}
 
 def save_keys(data):
@@ -57,11 +68,9 @@ def check_id_api(user_id):
     keys = load_keys()
     u_id = str(user_id)
     
-    # Check kung admin
     if int(user_id) == ADMIN_ID:
         return f"VERIFIED|ADMIN", 200
         
-    # Check sa keys.json
     for info in keys.values():
         if str(info.get("redeemed_by")) == u_id:
             expiry_str = info["expiry"]
@@ -130,13 +139,34 @@ async def redeem_cmd(client, message):
 async def back_main(client, cb):
     await search_menu(client, cb.message)
 
+@app.on_callback_query(filters.regex("^keyword_"))
+async def handle_search(client, cb):
+    kw = cb.data.split("_")[1]
+    await cb.message.edit_text(f"⏳ Searching database for: `{kw}`...")
+    
+    log_files = sorted([f for f in os.listdir() if re.fullmatch(r"logs\d+\.txt", f)])
+    results = []
+    
+    for log in log_files:
+        with open(log, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if kw.lower() in line.lower(): 
+                    results.append(line.strip())
+    
+    if not results:
+        return await cb.message.edit_text(f"❌ No matches found for `{kw}`.")
+    
+    res_path = f"results_{kw}.txt"
+    with open(res_path, "w") as f: f.write("\n".join(results[:500]))
+    
+    await client.send_document(cb.message.chat.id, res_path, caption=f"✅ Found: {len(results)}")
+    os.remove(res_path)
+
 # --- RUNNER ---
 def run_flask():
     flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
 if __name__ == "__main__":
-    # Start Flask in background
     Thread(target=run_flask).start()
-    # Run Pyrogram Bot
     print("Bot and Web API starting...")
     app.run()
