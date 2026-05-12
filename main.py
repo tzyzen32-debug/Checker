@@ -2,15 +2,10 @@ import os
 import json
 import random
 import datetime
-import pytz
-import asyncio
-import io
-import main
-import sys
 import re
-from collections import Counter
-
-from pyrogram import Client, filters, errors
+from flask import Flask
+from threading import Thread
+from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- CONFIGURATION ---
@@ -19,7 +14,8 @@ ADMIN_ID = 7472543084
 KEYS_FILE = "keys.json"
 user_state = {}
 
-# Session Name: "my_bot"
+# Initialize Flask and Pyrogram
+flask_app = Flask(__name__)
 app = Client(
     "my_bot",
     api_id=30387151,
@@ -27,82 +23,67 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# --- DATABASE HELPERS ---
+# --- HELPERS ---
 def load_keys():
-    return json.load(open(KEYS_FILE)) if os.path.exists(KEYS_FILE) else {}
+    if os.path.exists(KEYS_FILE):
+        with open(KEYS_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except:
+                return {}
+    return {}
 
 def save_keys(data):
     with open(KEYS_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 def check_user_access(user_id):
+    if user_id == ADMIN_ID: return True
     keys = load_keys()
     u_id = str(user_id)
-    if user_id == ADMIN_ID: return True
     for info in keys.values():
         if str(info.get("redeemed_by")) == u_id:
-            if datetime.datetime.fromisoformat(info["expiry"]) > datetime.datetime.now():
+            expiry = datetime.datetime.fromisoformat(info["expiry"])
+            if expiry > datetime.datetime.now():
                 return True
     return False
 
 def restricted_check(_, __, message):
     return check_user_access(message.from_user.id)
 
-# --- CORE COMMANDS ---
+# --- FLASK WEB API ---
+@flask_app.route('/check/<user_id>', methods=['GET'])
+def check_id_api(user_id):
+    keys = load_keys()
+    u_id = str(user_id)
+    
+    # Check kung admin
+    if int(user_id) == ADMIN_ID:
+        return f"VERIFIED|ADMIN", 200
+        
+    # Check sa keys.json
+    for info in keys.values():
+        if str(info.get("redeemed_by")) == u_id:
+            expiry_str = info["expiry"]
+            expiry_dt = datetime.datetime.fromisoformat(expiry_str)
+            if expiry_dt > datetime.datetime.now():
+                return f"VERIFIED|{expiry_str}", 200
+            else:
+                return "EXPIRED", 403
+                
+    return "DENIED", 403
 
+# --- BOT COMMANDS ---
 @app.on_message(filters.command("start"))
-async def start(client, message):
+async def start_cmd(client, message):
     if check_user_access(message.from_user.id):
-        await message.reply("✅ **Welcome back!** You have active access to the tools.")
+        await message.reply("✅ **Access Active!**\nGamitin ang `/search` para magsimula.")
     else:
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Buy Access Key", url="https://t.me/ASHxDeath")]])
         await message.reply(
-            "👋 **Welcome!**\n\nYou need an active key to use this bot.\n\n"
-            "Use `/redeem <key>` to activate your access.", 
+            "👋 **Welcome!**\n\nKailangan mo ng key para magamit ang bot.\nGamitin ang `/redeem <key>`.", 
             reply_markup=keyboard
         )
-
-@app.on_message(filters.command("generate") & filters.user(ADMIN_ID))
-async def generate_key(client, message):
-    try:
-        args = message.text.split()
-        if len(args) != 2: 
-            return await message.reply("❌ **Usage:** `/generate 1d` (d=days, h=hours)")
-        
-        unit, amount = args[1][-1].lower(), int(args[1][:-1])
-        delta = {"d": datetime.timedelta(days=amount), "h": datetime.timedelta(hours=amount)}.get(unit)
-        
-        if not delta:
-            return await message.reply("❌ Invalid time format. Use 'd' or 'h'.")
-
-        expiry = (datetime.datetime.now() + delta).isoformat()
-        key = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=15))
-        
-        keys = load_keys()
-        keys[key] = {"expiry": expiry, "redeemed_by": None}
-        save_keys(keys)
-        
-        await message.reply(f"✅ **Key Generated:**\n`{key}`\n⏳ **Expires in:** {args[1]}")
-    except Exception as e:
-        await message.reply(f"❌ **Error:** {str(e)}")
-
-@app.on_message(filters.command("redeem"))
-async def redeem_key(client, message):
-    args = message.text.split()
-    if len(args) != 2: 
-        return await message.reply("❌ **Usage:** `/redeem <key>`")
-    
-    key, u_id = args[1], str(message.from_user.id)
-    keys = load_keys()
-    
-    if key in keys and not keys[key]["redeemed_by"]:
-        keys[key]["redeemed_by"] = u_id
-        save_keys(keys)
-        await message.reply("✅ **Access Granted!** You can now use `/search` and other tools.")
-    else:
-        await message.reply("❌ **Invalid or already used key.**")
-
-# --- SEARCH SYSTEM ---
 
 @app.on_message(filters.command("search") & filters.create(restricted_check))
 async def search_menu(client, message):
@@ -111,98 +92,51 @@ async def search_menu(client, message):
         [InlineKeyboardButton("🛡 Garena", callback_data="expand_garena"), InlineKeyboardButton("🌐 Socials", callback_data="expand_socmeds")],
         [InlineKeyboardButton("🎮 Gaming", callback_data="expand_gaming")]
     ])
-    await message.reply("🔎 **Database Search**\nSelect a category to begin:", reply_markup=keyboard)
+    await message.reply("🔎 **Database Search**\nPumili ng kategorya:", reply_markup=keyboard)
 
-@app.on_callback_query(filters.regex("^expand_"))
-async def expand_menus(client, cb):
-    data = cb.data
-    if "garena" in data:
-        btns = [[InlineKeyboardButton("🎮 Garena.com", callback_data="keyword_garena.com")], [InlineKeyboardButton("🔙 Back", callback_data="back_to_main")]]
-        await cb.message.edit_text("🛡 **Garena Categories:**", reply_markup=InlineKeyboardMarkup(btns))
-    elif "socmeds" in data:
-        btns = [
-            [InlineKeyboardButton("📘 Facebook", callback_data="keyword_facebook.com"), InlineKeyboardButton("📸 Instagram", callback_data="keyword_instagram.com")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_to_main")]
-        ]
-        await cb.message.edit_text("🌐 **Social Media:**", reply_markup=InlineKeyboardMarkup(btns))
-    elif "gaming" in data:
-        btns = [
-            [InlineKeyboardButton("🎮 Riot Games", callback_data="keyword_riotgames.com"), InlineKeyboardButton("🕹 Steam", callback_data="keyword_steampowered.com")],
-            [InlineKeyboardButton("🔙 Back", callback_data="back_to_main")]
-        ]
-        await cb.message.edit_text("🎮 **Gaming Categories:**", reply_markup=InlineKeyboardMarkup(btns))
+@app.on_message(filters.command("generate") & filters.user(ADMIN_ID))
+async def gen_key(client, message):
+    try:
+        args = message.text.split()
+        if len(args) < 2: return await message.reply("Gamit: `/generate 1d` o `/generate 1h`")
+        time_val = args[1]
+        amount = int(time_val[:-1])
+        unit = time_val[-1].lower()
+        delta = datetime.timedelta(days=amount) if unit == 'd' else datetime.timedelta(hours=amount)
+        expiry = (datetime.datetime.now() + delta).isoformat()
+        key = "PREM-" + "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=10))
+        keys = load_keys()
+        keys[key] = {"expiry": expiry, "redeemed_by": None}
+        save_keys(keys)
+        await message.reply(f"✅ **Key Generated:** `{key}`\n⏳ **Valid for:** {time_val}")
+    except:
+        await message.reply("❌ Format error. Example: `/generate 30d`")
+
+@app.on_message(filters.command("redeem"))
+async def redeem_cmd(client, message):
+    args = message.text.split()
+    if len(args) < 2: return await message.reply("Gamit: `/redeem YOUR_KEY`")
+    key_input = args[1]
+    keys = load_keys()
+    u_id = str(message.from_user.id)
+    if key_input in keys and keys[key_input]["redeemed_by"] is None:
+        keys[key_input]["redeemed_by"] = u_id
+        save_keys(keys)
+        await message.reply("✅ **Success!** May access ka na.")
+    else:
+        await message.reply("❌ Invalid o nagamit na ang key.")
 
 @app.on_callback_query(filters.regex("^back_to_main$"))
 async def back_main(client, cb):
     await search_menu(client, cb.message)
 
-@app.on_callback_query(filters.regex("^keyword_"))
-async def handle_search(client, cb):
-    kw = cb.data.split("_")[1]
-    await cb.message.edit_text(f"⏳ Searching database for: `{kw}`...")
-    
-    log_files = sorted([f for f in os.listdir() if re.fullmatch(r"logs\d+\.txt", f)])
-    results = []
-    
-    for log in log_files:
-        if os.path.exists(log):
-            with open(log, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    if kw.lower() in line.lower(): 
-                        parts = line.strip().split(":")
-                        # Extracting last two parts (User:Pass)
-                        results.append(":".join(parts[-2:]) if len(parts) >= 2 else line.strip())
-    
-    if not results:
-        return await cb.message.edit_text(f"❌ No matches found for `{kw}`.")
-    
-    res_path = f"results_{kw}.txt"
-    sample_size = min(len(results), 500)
-    with open(res_path, "w", encoding="utf-8") as f: 
-        f.write("\n".join(random.sample(results, sample_size)))
-    
-    await client.send_document(
-        cb.message.chat.id, 
-        res_path, 
-        caption=f"🔎 **Search Result**\n\n**Keyword:** `{kw}`\n**Total Found:** {len(results)}\n**Sample Size:** {sample_size}"
-    )
-    os.remove(res_path)
+# --- RUNNER ---
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
 
-# --- TOOLS ---
-
-@app.on_message(filters.command("removeurl") & filters.create(restricted_check))
-async def remove_url_req(client, message):
-    user_state[message.from_user.id] = "awaiting_file"
-    await message.reply("📂 **URL Remover**\nPlease send the `.txt` file you want to clean.")
-
-@app.on_message(filters.document & filters.create(restricted_check))
-async def process_doc(client, message):
-    if user_state.get(message.from_user.id) != "awaiting_file":
-        return
-    
-    user_state.pop(message.from_user.id)
-    msg = await message.reply("⏳ Processing file...")
-    path = await message.download()
-    
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
-    
-    cleaned = []
-    for l in lines:
-        parts = l.strip().split(':')
-        if len(parts) >= 2:
-            cleaned.append(f"{parts[-2]}:{parts[-1]}")
-        else:
-            cleaned.append(l.strip())
-    
-    out_path = "cleaned_accounts.txt"
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(cleaned))
-    
-    await client.send_document(message.chat.id, out_path, caption="✅ **URL-req removed!**\nFormat: `User:Pass`")
-    await msg.delete()
-    os.remove(path)
-    os.remove(out_path)
-
-print("Bot is online. Token updated.")
-app.run()
+if __name__ == "__main__":
+    # Start Flask in background
+    Thread(target=run_flask).start()
+    # Run Pyrogram Bot
+    print("Bot and Web API starting...")
+    app.run()
